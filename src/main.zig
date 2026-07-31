@@ -1,71 +1,109 @@
 const std = @import("std");
-const Io = std.Io;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
 
-const qr_generator = @import("qr_generator");
+pub const ConversionError = error{
+    InvalidUtf8,
+    NoSpaceLeft,
+};
 
-pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
+pub fn utf8ToIso8859lossy(utf8: []const u8, out: []u8) ConversionError![]u8 {
+    var view = try std.unicode.Utf8View.init(utf8);
+    var it = view.iterator();
+    var idx: usize = 0;
+    while (it.nextCodepoint()) |codepoint| {
+        std.debug.print("got codepoint for {u}: {x}\n", .{ codepoint, codepoint });
 
-    // This is appropriate for anything that lives as long as the process.
-    const arena: std.mem.Allocator = init.arena.allocator();
-
-    // Accessing command line arguments:
-    const args = try init.minimal.args.toSlice(arena);
-    for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
+        if (codepoint <= 255) {
+            out[idx] = @as(u8, @intCast(codepoint));
+        } else {
+            out[idx] = '?';
+        }
+        idx += 1;
     }
 
-    // In order to do I/O operations need an `Io` instance.
-    const io = init.io;
+    return out[0..idx];
+}
 
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
+fn utf8ToIso8859(string: ?[]u8) !void {
+    var fallback_buf = [_]u8{'n'};
+
+    // Now both sides are mutable ([]u8)
+    const s: []u8 = string orelse &fallback_buf;
+    var utf8 = (try std.unicode.Utf8View.init(s)).iterator();
+    while (utf8.nextCodepointSlice()) |codepoint| {
+        std.debug.print("got codepoint for {s}: {x}\n", .{ codepoint, codepoint });
+    }
+}
+
+// In 0.16.0, main requires the 'init' parameter to access the new I/O system
+pub fn main(init: std.process.Init) !void {
+    // 1. Create buffers for stdin and stdout
+    var stdin_buffer: [1024]u8 = undefined;
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout_writer = &stdout_file_writer.interface;
 
-    try qr_generator.printAnotherMessage(stdout_writer);
+    // 2. Create the reader and writer using the NEW std.Io.File API
+    var stdin_wrapper = std.Io.File.stdin().reader(init.io, &stdin_buffer);
+    const stdin = &stdin_wrapper.interface;
 
-    try stdout_writer.flush(); // Don't forget to flush!
-}
+    var stdout_wrapper = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    const stdout = &stdout_wrapper.interface;
 
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
+    // 3. Prompt the user
+    try stdout.writeAll("Enter text: ");
+    try stdout.flush(); // CRITICAL: Forces the prompt to appear on screen immediately
 
-test "fuzz example" {
-    try std.testing.fuzz({}, testOne, .{});
-}
-
-fn testOne(context: void, smith: *std.testing.Smith) !void {
-    _ = context;
-    // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(gpa);
-    while (!smith.eos()) switch (smith.value(enum { add_data, dup_data })) {
-        .add_data => {
-            const slice = try list.addManyAsSlice(gpa, smith.value(u4));
-            smith.bytes(slice);
-        },
-        .dup_data => {
-            if (list.items.len == 0) continue;
-            if (list.items.len > std.math.maxInt(u32)) return error.SkipZigTest;
-            const len = smith.valueRangeAtMost(u32, 1, @min(32, list.items.len));
-            const off = smith.valueRangeAtMost(u32, 0, @intCast(list.items.len - len));
-            try list.appendSlice(gpa, list.items[off..][0..len]);
-            try std.testing.expectEqualSlices(
-                u8,
-                list.items[off..][0..len],
-                list.items[list.items.len - len ..],
-            );
-        },
+    // 4. Read until the user presses Enter ('\n')
+    // We use 'catch' to gracefully handle EOF (e.g., if the user presses Ctrl+D)
+    const line = stdin.takeDelimiter('\n') catch |err| {
+        if (err == error.EndOfStream) {
+            try stdout.writeAll("\nNo input received.\n");
+            try stdout.flush();
+            return;
+        }
+        return err;
     };
+
+    var out_buffer: [4096]u8 = undefined;
+    var iso_result: []u8 = undefined;
+    if (line) |text| {
+        iso_result = try utf8ToIso8859lossy(text, &out_buffer);
+    } else {
+        unreachable;
+    }
+
+    std.debug.print("Original UTF-8: {s}\n", .{line orelse "(no val)"});
+    std.debug.print("ISO-8859-1 hex: ", .{});
+
+    for (iso_result) |byte| {
+        std.debug.print("{X:0>2} ", .{byte});
+    }
+    std.debug.print("\n", .{});
+
+    // 5. Process and print the result
+    if (line) |text| {
+        // Trim Windows-specific carriage return ("\r") if present
+        // const clean_line = std.mem.trimRight(u8, text, "\r");
+
+        try stdout.print("You typed: {s}\n", .{text});
+        try stdout.flush();
+    }
+    try stdout.print("Press enter to exit...\n", .{});
+    try stdout.flush();
+    _ = try stdin.takeDelimiterExclusive('\n');
+}
+
+test "converting emoji" {
+    const test_input = "Yowasap 😀";
+
+    var out_buffer: [4096]u8 = undefined;
+    const iso_result = try utf8ToIso8859lossy(test_input, &out_buffer);
+
+    std.debug.print("Hex output: ", .{});
+    for (iso_result) |byte| {
+        std.debug.print("{X:0>2} ", .{byte});
+    }
+    std.debug.print("\n", .{});
+
+    try expect(true);
 }

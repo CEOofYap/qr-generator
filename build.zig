@@ -1,4 +1,5 @@
 const std = @import("std");
+const rlz = @import("raylib_zig");
 
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
@@ -20,6 +21,16 @@ pub fn build(b: *std.Build) void {
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
+
+    //raylib stuf
+    const raylib_dep = b.dependency("raylib_zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const raylib = raylib_dep.module("raylib"); // main raylib module
+    const raygui = raylib_dep.module("raygui"); // raygui module
+    const raylib_artifact = raylib_dep.artifact("raylib"); // raylib C library
 
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -82,6 +93,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.linkLibrary(raylib_artifact);
+    exe.root_module.addImport("raylib", raylib);
+    exe.root_module.addImport("raygui", raygui);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
@@ -115,6 +129,35 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    if (target.query.os_tag == .emscripten) {
+        const emsdk = rlz.emsdk;
+        const wasm = b.addLibrary(.{
+            .name = "qr_generator",
+            .root_module = exe.root_module,
+        });
+
+        const install_dir: std.Build.InstallDir = .{ .custom = "web" };
+        const emcc_flags = emsdk.emccDefaultFlags(b.allocator, .{ .optimize = optimize });
+        const emcc_settings = emsdk.emccDefaultSettings(b.allocator, .{ .optimize = optimize });
+
+        const emcc_step = emsdk.emccStep(b, raylib_artifact, wasm, .{
+            .optimize = optimize,
+            .flags = emcc_flags,
+            .settings = emcc_settings,
+            .install_dir = install_dir,
+        });
+        b.getInstallStep().dependOn(emcc_step);
+
+        const html_filename = std.fmt.allocPrint(b.allocator, "{s}.html", .{wasm.name}) catch unreachable;
+        const emrun_step = emsdk.emrunStep(
+            b,
+            b.getInstallPath(install_dir, html_filename),
+            &.{},
+        );
+
+        emrun_step.dependOn(emcc_step);
+        run_step.dependOn(emrun_step);
+    }
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
