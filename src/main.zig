@@ -1,40 +1,8 @@
 const std = @import("std");
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
-
-pub const ConversionError = error{
-    InvalidUtf8,
-    NoSpaceLeft,
-};
-
-pub fn utf8ToIso8859lossy(utf8: []const u8, out: []u8) ConversionError![]u8 {
-    var view = try std.unicode.Utf8View.init(utf8);
-    var it = view.iterator();
-    var idx: usize = 0;
-    while (it.nextCodepoint()) |codepoint| {
-        std.debug.print("got codepoint for {u}: {x}\n", .{ codepoint, codepoint });
-
-        if (codepoint <= 255) {
-            out[idx] = @as(u8, @intCast(codepoint));
-        } else {
-            out[idx] = '?';
-        }
-        idx += 1;
-    }
-
-    return out[0..idx];
-}
-
-fn utf8ToIso8859(string: ?[]u8) !void {
-    var fallback_buf = [_]u8{'n'};
-
-    // Now both sides are mutable ([]u8)
-    const s: []u8 = string orelse &fallback_buf;
-    var utf8 = (try std.unicode.Utf8View.init(s)).iterator();
-    while (utf8.nextCodepointSlice()) |codepoint| {
-        std.debug.print("got codepoint for {s}: {x}\n", .{ codepoint, codepoint });
-    }
-}
+const rl = @import("raylib");
+const util = @import("root.zig");
 
 // In 0.16.0, main requires the 'init' parameter to access the new I/O system
 pub fn main(init: std.process.Init) !void {
@@ -48,6 +16,19 @@ pub fn main(init: std.process.Init) !void {
 
     var stdout_wrapper = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_wrapper.interface;
+
+    // Making a raylib stuff
+    rl.initWindow(1280, 720, "raylib texting");
+    defer rl.closeWindow();
+
+    while (!rl.windowShouldClose()) {
+        rl.beginDrawing();
+        defer rl.endDrawing();
+
+        rl.clearBackground(rl.Color.sky_blue);
+
+        rl.drawText("This is the first window!", 20, 20, 20, .black);
+    }
 
     // 3. Prompt the user
     try stdout.writeAll("Enter text: ");
@@ -67,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
     var out_buffer: [4096]u8 = undefined;
     var iso_result: []u8 = undefined;
     if (line) |text| {
-        iso_result = try utf8ToIso8859lossy(text, &out_buffer);
+        iso_result = try util.utf8ToIso8859lossy(text, &out_buffer);
     } else {
         unreachable;
     }
@@ -97,7 +78,7 @@ test "converting emoji" {
     const test_input = "Yowasap 😀";
 
     var out_buffer: [4096]u8 = undefined;
-    const iso_result = try utf8ToIso8859lossy(test_input, &out_buffer);
+    const iso_result = try util.utf8ToIso8859lossy(test_input, &out_buffer);
 
     std.debug.print("Hex output: ", .{});
     for (iso_result) |byte| {
