@@ -1,5 +1,6 @@
 const std = @import("std");
 const expectEqual = std.testing.expectEqual;
+const expectError = std.testing.expectError;
 
 const galoisError = error{
     AlreadyExponent,
@@ -7,7 +8,7 @@ const galoisError = error{
     ValueNotFound,
 };
 
-const galois_num = struct {
+pub const galois_num = struct {
     data: u8 = 0,
     is_exponent: bool = false,
     const Self = @This();
@@ -22,6 +23,50 @@ const galois_num = struct {
         if (self.is_exponent) return galoisError.AlreadyExponent;
         self.data = @intCast(std.mem.findScalar(u8, &pow2_table, self.data) orelse return galoisError.ValueNotFound);
         self.is_exponent = true;
+    }
+
+    /// convert 2 galois num into exponent form and multiply it
+    /// always return in exponent form unless result is 0
+    pub fn mul(a: Self, b: Self) Self {
+        var x = a;
+        var y = b;
+        if (!x.is_exponent) {
+            // any num multiply with 0 is 0
+            if (x.data == 0) return .{ .data = 0, .is_exponent = false };
+            //  convert to exponent
+            x.convert_to_exponent() catch unreachable;
+        }
+        if (!y.is_exponent) {
+            // any num multiply with 0 is 0
+            if (y.data == 0) return .{ .data = 0, .is_exponent = false };
+            //  convert to exponent
+            y.convert_to_exponent() catch unreachable;
+        }
+
+        return .{
+            .data = @intCast((@as(u16, x.data) + y.data) % 255),
+            .is_exponent = true,
+        };
+    }
+
+    /// convert 2 galois num into value form and add it
+    /// always return in value form
+    pub fn add(a: Self, b: Self) Self {
+        var x = a;
+        var y = b;
+        if (x.is_exponent) {
+            //  convert to value
+            x.convert_to_value() catch unreachable;
+        }
+        if (y.is_exponent) {
+            //  convert to value
+            y.convert_to_value() catch unreachable;
+        }
+
+        return .{
+            .data = x.data ^ y.data,
+            .is_exponent = false,
+        };
     }
 };
 
@@ -83,28 +128,134 @@ test "galois multiply by 2" {
 
 test "converting to exponent" {
     var a: galois_num = .{ .data = 8, .is_exponent = false };
-    const b: galois_num = .{ .data = 3, .is_exponent = true };
     try a.convert_to_exponent();
-    try expectEqual(a, b);
+    try expectEqual(@as(u8, 3), a.data);
+    try expectEqual(true, a.is_exponent);
     var c: galois_num = .{ .data = 22, .is_exponent = false };
-    const d: galois_num = .{ .data = 239, .is_exponent = true };
     try c.convert_to_exponent();
-    try expectEqual(c, d);
+    try expectEqual(@as(u8, 239), c.data);
+    try expectEqual(true, c.is_exponent);
 }
 
 test "converting to value" {
     var a: galois_num = .{ .data = 4, .is_exponent = true };
-    const b: galois_num = .{ .data = 16, .is_exponent = false };
     try a.convert_to_value();
-    try expectEqual(a, b);
+    try expectEqual(@as(u8, 16), a.data);
+    try expectEqual(false, a.is_exponent);
 
     var c: galois_num = .{ .data = 8, .is_exponent = true };
-    const d: galois_num = .{ .data = 29, .is_exponent = false };
     try c.convert_to_value();
-    try expectEqual(c, d);
+    try expectEqual(@as(u8, 29), c.data);
+    try expectEqual(false, c.is_exponent);
 
     var e: galois_num = .{ .data = 255, .is_exponent = true };
-    const f: galois_num = .{ .data = 1, .is_exponent = false };
     try e.convert_to_value();
-    try expectEqual(e, f);
+    try expectEqual(@as(u8, 1), e.data);
+    try expectEqual(false, e.is_exponent);
+}
+
+test "galois mul" {
+    // value 2 (2^1) * value 4 (2^2) = exp 3 (2^3 = 8)
+    var got = galois_num.mul(
+        .{ .data = 2, .is_exponent = false },
+        .{ .data = 4, .is_exponent = false },
+    );
+    try expectEqual(@as(u8, 3), got.data);
+    try expectEqual(true, got.is_exponent);
+
+    // mixed forms: exp 1 * value 4 = exp 3
+    got = galois_num.mul(
+        .{ .data = 1, .is_exponent = true },
+        .{ .data = 4, .is_exponent = false },
+    );
+    try expectEqual(@as(u8, 3), got.data);
+    try expectEqual(true, got.is_exponent);
+
+    // exp 0 is value 1, identity: exp 17 * exp 0 = exp 17
+    got = galois_num.mul(
+        .{ .data = 17, .is_exponent = true },
+        .{ .data = 0, .is_exponent = true },
+    );
+    try expectEqual(@as(u8, 17), got.data);
+    try expectEqual(true, got.is_exponent);
+
+    // exponent wraps mod 255: (200 + 100) % 255 = 45
+    got = galois_num.mul(
+        .{ .data = 200, .is_exponent = true },
+        .{ .data = 100, .is_exponent = true },
+    );
+    try expectEqual(@as(u8, 45), got.data);
+    try expectEqual(true, got.is_exponent);
+
+    // zero absorbs: any num * 0 = 0 in value form
+    got = galois_num.mul(
+        .{ .data = 0, .is_exponent = false },
+        .{ .data = 7, .is_exponent = false },
+    );
+    try expectEqual(@as(u8, 0), got.data);
+    try expectEqual(false, got.is_exponent);
+
+    // zero absorbs exponent-form operand too
+    got = galois_num.mul(
+        .{ .data = 0, .is_exponent = false },
+        .{ .data = 10, .is_exponent = true },
+    );
+    try expectEqual(@as(u8, 0), got.data);
+    try expectEqual(false, got.is_exponent);
+}
+
+test "galois add" {
+    // value 12 + value 10 = 12 ^ 10 = 6
+    var got = galois_num.add(
+        .{ .data = 12, .is_exponent = false },
+        .{ .data = 10, .is_exponent = false },
+    );
+    try expectEqual(@as(u8, 6), got.data);
+    try expectEqual(false, got.is_exponent);
+
+    // exp 1 (value 2) + exp 2 (value 4) = 2 ^ 4 = 6
+    got = galois_num.add(
+        .{ .data = 1, .is_exponent = true },
+        .{ .data = 2, .is_exponent = true },
+    );
+    try expectEqual(@as(u8, 6), got.data);
+    try expectEqual(false, got.is_exponent);
+
+    // exp 3 (value 8) + value 12: 8 ^ 12 = 4
+    got = galois_num.add(
+        .{ .data = 3, .is_exponent = true },
+        .{ .data = 12, .is_exponent = false },
+    );
+    try expectEqual(@as(u8, 4), got.data);
+    try expectEqual(false, got.is_exponent);
+
+    // zero is identity: 0 + 5 = 5
+    got = galois_num.add(
+        .{ .data = 0, .is_exponent = false },
+        .{ .data = 5, .is_exponent = false },
+    );
+    try expectEqual(@as(u8, 5), got.data);
+    try expectEqual(false, got.is_exponent);
+
+    // self + self = 0: 7 ^ 7 = 0
+    got = galois_num.add(
+        .{ .data = 7, .is_exponent = false },
+        .{ .data = 7, .is_exponent = false },
+    );
+    try expectEqual(@as(u8, 0), got.data);
+    try expectEqual(false, got.is_exponent);
+}
+
+test "convert errors" {
+    // 0 has no exponent: absent from pow2_table
+    var zero: galois_num = .{ .data = 0, .is_exponent = false };
+    try expectError(error.ValueNotFound, zero.convert_to_exponent());
+
+    // already exponent
+    var exp: galois_num = .{ .data = 1, .is_exponent = true };
+    try expectError(error.AlreadyExponent, exp.convert_to_exponent());
+
+    // already value
+    var val: galois_num = .{ .data = 5, .is_exponent = false };
+    try expectError(error.AlreadyNonexponent, val.convert_to_value());
 }
