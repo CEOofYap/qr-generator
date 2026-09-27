@@ -1,6 +1,8 @@
 const std = @import("std");
 const expectEqual = std.testing.expectEqual;
 const expectError = std.testing.expectError;
+const ArrayList = std.ArrayList;
+const test_alc = std.testing.allocator;
 
 const galoisError = error{
     AlreadyExponent,
@@ -12,6 +14,10 @@ pub const galois_num = struct {
     data: u8 = 0,
     is_exponent: bool = false,
     const Self = @This();
+
+    pub fn isZero(self: Self) bool {
+        return !self.is_exponent and self.data == 0;
+    }
 
     pub fn convert_to_value(self: *Self) !void {
         if (!self.is_exponent) return galoisError.AlreadyNonexponent;
@@ -78,6 +84,98 @@ pub const pow2_table: [256]u8 = blk: {
         value = gf_mul2(value);
     }
     break :blk table;
+};
+
+pub const polynomial = struct {
+    coef: ArrayList(galois_num) = .empty,
+    allocator: std.mem.Allocator,
+    const Self = @This();
+
+    /// Create arraylist of coefficient based on power.
+    /// 0 -> (x^0) one element, 1 -> 2 element (x^1 + x^0)
+    /// coef[0] is x^0, coef[n] is x^n.
+    pub fn init(polynomial_power: usize, allocator: std.mem.Allocator) !Self {
+        var self = Self{
+            .coef = .empty,
+            .allocator = allocator,
+        };
+        try self.coef.appendNTimes(
+            allocator,
+            .{ .data = 0, .is_exponent = false },
+            polynomial_power + 1,
+        );
+        return self;
+    }
+    pub fn deinit(self: *Self) void {
+        self.coef.deinit(self.allocator);
+    }
+
+    /// Test / convenience constructor from raw values (value-form).
+    /// `&.{ 1, 4, 2 }` means 1 + 4*x + 2*x^2, i.e. coef[0] is x^0.
+    pub fn fromValues(allocator: std.mem.Allocator, values: []const u8) !Self {
+        var self = Self{
+            .coef = .empty,
+            .allocator = allocator,
+        };
+        for (values) |v| {
+            try self.coef.append(allocator, .{ .data = v, .is_exponent = false });
+        }
+        self.normalize();
+        return self;
+    }
+
+    /// Drop highest-degree zero coefficients (trailing items, since coef[0] is x^0).
+    /// Keeps at least one coefficient so zero poly stays as [0].
+    pub fn normalize(self: *Self) void {
+        while (self.coef.items.len > 1 and self.coef.items[self.coef.items.len - 1].isZero()) {
+            _ = self.coef.pop();
+        }
+    }
+
+    pub fn normalizeToExponent(self: *Self) !void {
+        for (self.coef.items) |*coefficient| {
+            if (coefficient.isZero()) continue;
+            if (!coefficient.is_exponent) try coefficient.convert_to_exponent();
+        }
+    }
+
+    /// coef[0] is x^0, so (a_i * x^i) * (b_j * x^j) accumulates into res[i + j].
+    pub fn mul(a: Self, b: Self) !Self {
+        const len_a = a.coef.items.len;
+        const len_b = b.coef.items.len;
+        if (len_a == 0 or len_b == 0) return Self{ .coef = .empty, .allocator = a.allocator };
+
+        // deg = len-1, so result deg = (len_a-1) + (len_b-1)
+        const result_power: usize = (len_a - 1) + (len_b - 1);
+        var res: Self = try .init(result_power, a.allocator);
+
+        for (a.coef.items, 0..) |a_coefficient, i| {
+            for (b.coef.items, 0..) |b_coefficient, j| {
+                const prod = galois_num.mul(a_coefficient, b_coefficient);
+                res.coef.items[i + j] = galois_num.add(prod, res.coef.items[i + j]);
+            }
+        }
+        return res;
+    }
+
+    /// Coefficient-wise XOR. Missing coefficients (unequal lengths) count as 0.
+    pub fn add(a: Self, b: Self) !Self {
+        const len_a = a.coef.items.len;
+        const len_b = b.coef.items.len;
+        const max_len = @max(len_a, len_b);
+        if (max_len == 0) return Self{ .coef = .empty, .allocator = a.allocator };
+
+        var res: Self = try .init(max_len - 1, a.allocator);
+        const zero: galois_num = .{ .data = 0, .is_exponent = false };
+
+        for (res.coef.items, 0..) |*c, i| {
+            const av = if (i < len_a) a.coef.items[i] else zero;
+            const bv = if (i < len_b) b.coef.items[i] else zero;
+            c.* = galois_num.add(av, bv);
+        }
+        res.normalize();
+        return res;
+    }
 };
 
 ///Galois add or subtract is just bitwise XOR
@@ -258,4 +356,66 @@ test "convert errors" {
     // already value
     var val: galois_num = .{ .data = 5, .is_exponent = false };
     try expectError(error.AlreadyNonexponent, val.convert_to_value());
+}
+
+fn expectPolyValues(poly: *const polynomial, expected: []const u8) !void {
+    try std.testing.expectEqual(expected.len, poly.coef.items.len);
+    for (expected, 0..) |v, i| {
+        try std.testing.expectEqual(v, poly.coef.items[i].data);
+        try std.testing.expectEqual(false, poly.coef.items[i].is_exponent);
+    }
+}
+
+test "polynomial fromValues trims leading zeros" {
+    var p = try polynomial.fromValues(test_alc, &.{ 1, 0, 0 });
+    defer p.deinit();
+    try expectPolyValues(&p, &.{1});
+}
+
+test "polynomial add same length xors coefficients" {
+    var a = try polynomial.fromValues(test_alc, &.{ 1, 2 });
+    defer a.deinit();
+    var b = try polynomial.fromValues(test_alc, &.{ 3, 4 });
+    defer b.deinit();
+    var res = try polynomial.add(a, b);
+    defer res.deinit();
+    // 1^3=2, 2^4=6
+    try expectPolyValues(&res, &.{ 2, 6 });
+}
+
+test "polynomial add pads shorter operand with zeros" {
+    var a = try polynomial.fromValues(test_alc, &.{ 1, 2, 3 });
+    defer a.deinit();
+    var b = try polynomial.fromValues(test_alc, &.{4});
+    defer b.deinit();
+    var res = try polynomial.add(a, b);
+    defer res.deinit();
+    // 1^4=5, rest unchanged
+    try expectPolyValues(&res, &.{ 5, 2, 3 });
+}
+
+test "polynomial add trims leading zero to single zero" {
+    var a = try polynomial.fromValues(test_alc, &.{ 5, 3 });
+    defer a.deinit();
+    var b = try polynomial.fromValues(test_alc, &.{ 5, 3 });
+    defer b.deinit();
+    var res = try polynomial.add(a, b);
+    defer res.deinit();
+    try expectPolyValues(&res, &.{0});
+}
+test "polynomial mul" {
+    var a = try polynomial.fromValues(test_alc, &.{ 1, 4, 2 });
+    defer a.deinit();
+    var b = try polynomial.fromValues(test_alc, &.{ 3, 5 });
+    defer b.deinit();
+    var res = try polynomial.mul(a, b);
+    defer res.deinit();
+    // coef[0] is x^0: [1,4,2]*[3,5] = [3,9,18,10] in GF
+    try std.testing.expectEqual(@as(usize, 4), res.coef.items.len);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 9, 18, 10 }, &.{
+        res.coef.items[0].data,
+        res.coef.items[1].data,
+        res.coef.items[2].data,
+        res.coef.items[3].data,
+    });
 }
